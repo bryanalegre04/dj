@@ -17,6 +17,8 @@ body{padding:env(safe-area-inset-top) env(safe-area-inset-right) calc(78px + env
 button{font:inherit;color:inherit;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 4px;user-select:none;-webkit-user-select:none;touch-action:manipulation;min-height:38px}
 button:active{filter:brightness(1.4)}
 button.on{background:var(--ai);border-color:var(--ai);color:#111}
+button.sent{box-shadow:0 0 0 2px #fbbf24 inset}
+button.ack{box-shadow:0 0 0 3px #22c55e inset;filter:brightness(1.5)}
 .dA{--c:var(--A)}.dB{--c:var(--B)}
 .pdeck button.on,.mxc button.on{background:var(--c);border-color:var(--c);color:#111}
 select,input[type=text],input[type=search]{font:inherit;color:var(--tx);background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px;max-width:100%}
@@ -188,7 +190,13 @@ let peer=null,conn=null,retryT=null;
 /* ---------- conexión ---------- */
 function loadScript(urls){return new Promise((res,rej)=>{const go=i=>{if(i>=urls.length)return rej(new Error('script'));const s=document.createElement('script');s.src=urls[i];s.onload=()=>res();s.onerror=()=>{s.remove();go(i+1)};document.head.appendChild(s)};go(0)})}
 function status(kind,txt){$('#dot').className=kind;setText($('#stat'),txt)}
-function send(m){if(conn&&conn.open){try{conn.send(m)}catch(e){}}else if(window.__bridge)window.__bridge(m)}
+let seq=0;const pending={};
+function send(m){if(conn&&conn.open){try{conn.send(m)}catch(e){toast('No se pudo enviar. Revisa la conexión.')}}else if(window.__bridge)window.__bridge(m);else{toast('📵 Sin conexión con la laptop');return false}return true}
+function sendAck(m,el){m.n=++seq;if(!send(m))return;if(el){el.classList.add('sent');const n=m.n;pending[n]={el,t:setTimeout(()=>{delete pending[n];el.classList.remove('sent');toast('⚠ La laptop no respondió. Revisa que siga abierta.')},2000)}}}
+function gotAck(m){const p=pending[m.n];if(!p)return;clearTimeout(p.t);delete pending[m.n];p.el.classList.remove('sent');p.el.classList.add('ack');setTimeout(()=>p.el.classList.remove('ack'),220)}
+/* tap robusto: pointerdown; si el navegador no lo manda, usa click */
+function onTap(el,fn){let last=0;el.addEventListener('pointerdown',e=>{if(e.pointerType==='mouse'&&e.button!==0)return;e.preventDefault();last=performance.now();fn(e)});
+ el.addEventListener('click',e=>{if(performance.now()-last<700)return;fn(e)})}
 async function start(){if(!code){$('#pair').classList.add('on');return}$('#pair').classList.remove('on');localStorage.setItem('djc.code',code);if(location.hash.slice(1)!==code)history.replaceState(null,'','#'+code);
  if(window.__bridge){status('ok','Modo prueba');return}
  status('','Conectando con '+code+'…');
@@ -208,7 +216,7 @@ function onMsg(m){if(!m)return;
  if(m.t==='st'){S.st=m;S.recv=performance.now();applyState()}
  else if(m.t==='peaks'){S.peaks[m.d]={tid:m.tid,p:m.p}}
  else if(m.t==='lib'){S.lib=m.items||[];renderLib()}
- else if(m.t==='pong'){S.lat=performance.now()-m.ts;if(conn&&conn.open)status('ok','Conectado · '+code+' · '+Math.round(S.lat)+' ms')}}
+ else if(m.t==='ack')gotAck(m);else if(m.t==='toast')toast(m.m);else if(m.t==='pong'){S.lat=performance.now()-m.ts;if(conn&&conn.open)status('ok','Conectado · '+code+' · '+Math.round(S.lat)+' ms')}}
 
 /* ---------- construir interfaz ---------- */
 function deckHTML(D){return `<div class="ph"><span class="dl">${D}</span><b class="ttl">Vacío</b><span class="kb">—</span><span class="led"></span></div>
@@ -229,23 +237,24 @@ ${kn(D,'fxwet','Cantidad',0,1,0.01)}<button id="${D}-fxon" style="width:100%;min
 function build(){for(const D of ['A','B']){$('#pd'+D).innerHTML=deckHTML(D);$('#mx'+D).innerHTML=mixHTML(D);$('#fx'+D).innerHTML=fxHTML(D)}
  const BTN=['play','cue','sync','vinyl','slip','lin','lout','lhalf','ldbl','lexit','echo','brake','spin','hp','tap','d2','x2','gl','gr','fxon'];
  for(const D of ['A','B']){
-  BTN.forEach(k=>{const el=$('#'+D+'-'+k);if(el)el.addEventListener('pointerdown',e=>{e.preventDefault();vib(8);send({t:'btn',id:D+'-'+k})})});
-  ['rev','bl','br'].forEach(k=>{const el=$('#'+D+'-'+k);let on=false;el.addEventListener('pointerdown',e=>{e.preventDefault();on=true;vib(8);el.classList.add('on');send({t:'hold',id:D+'-'+k,on:true})});
-   ['pointerup','pointercancel','pointerleave'].forEach(ev=>el.addEventListener(ev,()=>{if(!on)return;on=false;el.classList.remove('on');send({t:'hold',id:D+'-'+k,on:false})}))});
-  $$('#pd'+D+' [data-pm]').forEach(b=>b.addEventListener('pointerdown',e=>{e.preventDefault();send({t:'pm',d:D,m:b.dataset.pm})}));
-  const del=$('#pd'+D+' [data-del]');del.addEventListener('pointerdown',e=>{e.preventDefault();S.del[D]=!S.del[D];del.classList.toggle('on',S.del[D]);if(S.del[D])toast('Toca el hot cue que quieres borrar')});
+  BTN.forEach(k=>{const el=$('#'+D+'-'+k);if(el)onTap(el,()=>{vib(8);sendAck({t:'btn',id:D+'-'+k},el)})});
+  ['rev','bl','br'].forEach(k=>{const el=$('#'+D+'-'+k);let on=false,t0=0;const down=e=>{if(on)return;if(e&&e.cancelable)e.preventDefault();on=true;t0=performance.now();vib(8);el.classList.add('on');sendAck({t:'hold',id:D+'-'+k,on:true},el)};
+   const upf=()=>{if(!on)return;const held=performance.now()-t0;on=false;const fin=()=>{el.classList.remove('on');send({t:'hold',id:D+'-'+k,on:false})};if(held<350)setTimeout(fin,350-held);else fin()};
+   el.addEventListener('pointerdown',down);el.addEventListener('touchstart',e=>{if(!on)down(e)},{passive:false});['pointerup','pointercancel','touchend','touchcancel'].forEach(ev=>el.addEventListener(ev,upf));el.addEventListener('contextmenu',e=>e.preventDefault())});
+  $$('#pd'+D+' [data-pm]').forEach(b=>onTap(b,()=>{vib(6);send({t:'pm',d:D,m:b.dataset.pm})}));
+  const del=$('#pd'+D+' [data-del]');onTap(del,()=>{S.del[D]=!S.del[D];del.classList.toggle('on',S.del[D]);if(S.del[D])toast('Toca el hot cue que quieres borrar')});
   const pads=$('#'+D+'-pads');
-  pads.addEventListener('pointerdown',e=>{const b=e.target.closest('[data-pad]');if(!b)return;e.preventDefault();vib(12);const dl=S.del[D];send({t:'pad',d:D,i:+b.dataset.pad,down:true,del:dl});if(dl){S.del[D]=false;del.classList.remove('on')}b.dataset.held='1'});
+  pads.addEventListener('pointerdown',e=>{const b=e.target.closest('[data-pad]');if(!b)return;e.preventDefault();vib(12);const dl=S.del[D];sendAck({t:'pad',d:D,i:+b.dataset.pad,down:true,del:dl},b);if(dl){S.del[D]=false;del.classList.remove('on')}b.dataset.held='1'});
   const up=e=>{const b=e.target.closest&&e.target.closest('[data-pad]');if(!b||!b.dataset.held)return;delete b.dataset.held;send({t:'pad',d:D,i:+b.dataset.pad,down:false})};
-  pads.addEventListener('pointerup',up);pads.addEventListener('pointercancel',up);pads.addEventListener('pointerout',up);
+  pads.addEventListener('pointerup',up);pads.addEventListener('pointercancel',up);pads.addEventListener('pointerleave',up);
   $('#pd'+D+' .ov').addEventListener('pointerdown',e=>{const r=e.target.getBoundingClientRect();send({t:'seek',d:D,f:(e.clientX-r.left)/r.width})});
   wirePlatter(D);
   ['fxtype','fxbeat'].forEach(k=>$('#'+D+'-'+k).addEventListener('change',e=>send({t:'sel',id:D+'-'+k,v:e.target.value})))}
  $$('input[type=range]').forEach(el=>{const id=el.id;let pend=null,raf=0;
   el.addEventListener('input',()=>{S.touched[id]=performance.now();pend=+el.value;showOut(el);if(!raf)raf=requestAnimationFrame(()=>{raf=0;send({t:'ctrl',id,v:pend})})});
   el.addEventListener('dblclick',()=>{const k=id.includes('-')?id.split('-')[1]:id;if(DEF[k]!=null){el.value=DEF[k];S.touched[id]=performance.now();send({t:'ctrl',id,v:DEF[k]});showOut(el)}})});
- $$('[data-fx]').forEach(b=>b.addEventListener('pointerdown',e=>{e.preventDefault();vib(15);send({t:'fx',name:b.dataset.fx})}));
- ['mixNow','save','start','quant','rec','doIt','assistDo','assistX'].forEach(id=>$('#'+id).addEventListener('pointerdown',e=>{e.preventDefault();vib(15);send({t:'btn',id})}));
+ $$('[data-fx]').forEach(b=>onTap(b,()=>{vib(15);sendAck({t:'fx',name:b.dataset.fx},b)}));
+ ['mixNow','save','start','quant','rec','doIt','assistDo','assistX'].forEach(id=>{const el=$('#'+id);onTap(el,()=>{vib(15);sendAck({t:'btn',id},el)})});
  ['curve','len','tricks'].forEach(id=>$('#'+id).addEventListener('change',e=>send({t:'sel',id,v:e.target.value})));
  ['safety','split'].forEach(id=>$('#'+id).addEventListener('change',e=>send({t:'chk',id,v:e.target.checked})));
  $$('#modeSeg [data-m]').forEach(b=>b.addEventListener('click',()=>send({t:'mode',m:b.dataset.m})));
@@ -292,7 +301,7 @@ function applyState(){const st=S.st;
   setText(root.querySelector('.ttl'),d.ld?'Cargando… '+d.ti:(d.ti||'Vacío'));setText(root.querySelector('.art'),[d.ar,d.g].filter(Boolean).join(' · '));
   const kb=root.querySelector('.kb');setText(kb,d.k||'—');kb.classList.toggle('ok',d.kc===true);kb.classList.toggle('bad',d.kc===false);
   root.classList.toggle('live',d.live);setText(root.querySelector('.bpm'),d.tb?(d.tb*d.rate).toFixed(1):'--');
-  setText($('#'+D+'-play'),d.pl?'❚❚':'▶');tog(D+'-play',d.pl);tog(D+'-vinyl',d.vinyl);tog(D+'-slip',d.slip);tog(D+'-echo',d.echo);tog(D+'-hp',d.pfl);tog(D+'-fxon',d.fxOn);tog(D+'-brake',d.brk);tog(D+'-spin',d.spn);
+  setText($('#'+D+'-play'),d.pl?'❚❚':'▶');tog(D+'-play',d.pl);tog(D+'-vinyl',d.vinyl);tog(D+'-slip',d.slip);tog(D+'-echo',d.echo);tog(D+'-hp',d.pfl);tog(D+'-fxon',d.fxOn);tog(D+'-brake',d.brk);tog(D+'-spin',d.spn);tog(D+'-lin',d.lin||!!d.loop);tog(D+'-lout',!!d.loop);
   setText($('#'+D+'-fxon'),d.fxOn?'FX ON ✓':'FX ON');setSel(D+'-fxtype',d.fxT);setSel(D+'-fxbeat',d.fxB);
   for(const k in d.c)setRange(D+'-'+k,d.c[k]);
   $$('#pd'+D+' [data-pm]').forEach(b=>b.classList.toggle('on',b.dataset.pm===d.pm));$('#pd'+D+' [data-del]').style.display=d.pm==='cue'?'':'none';
